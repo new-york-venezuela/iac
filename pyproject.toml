@@ -1,5 +1,5 @@
 [project]
-name = "mailcow-iac"
+name = "iac"
 version = "0.1.0"
 description = "GitOps-driven Mailcow + Caddy on Hetzner Cloud — IaC toolchain"
 requires-python = ">=3.12"
@@ -12,6 +12,7 @@ dependencies = [
 [tool.uv]
 # Pin the resolver to a deterministic algorithm
 resolution = "highest"
+package = false
 
 [build-system]
 requires = ["hatchling"]
