@@ -1,0 +1,58 @@
+{
+	# Global ACME account email — required for Let's Encrypt TLS
+	email {{ admin_email }}
+
+	# Harden TLS
+	servers {
+		protocols tls1.2 tls1.3
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Corporate website — served directly from disk by Caddy
+# ---------------------------------------------------------------------------
+{{ domain }}, www.{{ domain }} {
+	root * /var/www/corporate-site
+	file_server
+
+	encode gzip
+
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "SAMEORIGIN"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		Permissions-Policy        "geolocation=(), microphone=(), camera=()"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/{{ domain }}-access.log {
+			roll_size     50mb
+			roll_keep     5
+			roll_keep_for 720h
+		}
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Mail server — Caddy terminates TLS, proxies HTTP to Mailcow on localhost
+# Mailcow listens on 127.0.0.1:8080 with SKIP_LETS_ENCRYPT=y
+# ---------------------------------------------------------------------------
+mail.{{ domain }} {
+	reverse_proxy 127.0.0.1:8080 {
+		header_up  Host             {host}
+		header_up  X-Real-IP        {remote_host}
+		header_up  X-Forwarded-For  {remote_host}
+		header_up  X-Forwarded-Proto https
+	}
+
+	log {
+		output file /var/log/caddy/mail-access.log {
+			roll_size     50mb
+			roll_keep     5
+			roll_keep_for 720h
+		}
+	}
+}

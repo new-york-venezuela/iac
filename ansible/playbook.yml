@@ -1,0 +1,512 @@
+---
+# =============================================================================
+# Mailcow + Caddy server provisioning playbook
+# =============================================================================
+# Prerequisites:
+#   ansible-galaxy collection install -r ansible/requirements.yml
+#
+# Run:
+#   ansible-playbook -i ansible/inventory.ini ansible/playbook.yml \
+#     -e domain=acmecorp.com \
+#     -e admin_email=admin@acmecorp.com \
+#     -e timezone=Europe/Berlin
+#
+# All vars below have sensible defaults; override via -e or group_vars/all.yml.
+# =============================================================================
+
+- name: Mailcow + Caddy server configuration
+  hosts: mailserver
+  become: true
+
+  vars:
+    # -- Company / domain settings (override per deployment) --
+    domain: "example.com"
+    admin_email: "admin@example.com"
+    timezone: "UTC"
+
+    # -- Derived values --
+    mail_hostname: "mail.{{ domain }}"
+
+    # -- Paths --
+    mailcow_dir: /opt/mailcow-dockerized
+    web_root: /var/www/corporate-site
+    volume_mount: /mnt/mailcow-data
+    backup_dir: /mnt/mailcow-data/backups
+
+    # -- Mailcow tuning --
+    skip_clamd: "y"      # Disable ClamAV; set to "n" if RAM > 8 GB
+    skip_rspamd: "n"
+    mailcow_branch: master
+
+    # -- Docker --
+    docker_log_max_size: "50m"
+    docker_log_max_file: "3"
+
+  handlers:
+    - name: Restart Docker
+      ansible.builtin.service:
+        name: docker
+        state: restarted
+
+    - name: Reload Caddy
+      ansible.builtin.service:
+        name: caddy
+        state: reloaded
+
+    - name: Restart Caddy
+      ansible.builtin.service:
+        name: caddy
+        state: restarted
+
+  # ===========================================================================
+  # BLOCK 1 — Host hardening & prep
+  # ===========================================================================
+  tasks:
+    - name: "PREP | Update apt cache"
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      tags: prep
+
+    - name: "PREP | Install baseline packages"
+      ansible.builtin.apt:
+        name:
+          - git
+          - curl
+          - rsync
+          - rclone
+          - ca-certificates
+          - gnupg
+          - apt-transport-https
+          - python3-pip
+          - python3-venv
+          - nftables
+          - fail2ban
+          - unattended-upgrades
+        state: present
+      tags: prep
+
+    - name: "PREP | Enable automatic security updates"
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+        mode: "0644"
+      tags: prep
+
+    - name: "PREP | Check if swapfile already exists"
+      ansible.builtin.stat:
+        path: /swapfile
+      register: swapfile_stat
+      tags: prep
+
+    - name: "PREP | Allocate 4 GB swapfile"
+      ansible.builtin.command:
+        cmd: fallocate -l 4G /swapfile
+      when: not swapfile_stat.stat.exists
+      tags: prep
+
+    - name: "PREP | Lock down swapfile permissions"
+      ansible.builtin.file:
+        path: /swapfile
+        owner: root
+        group: root
+        mode: "0600"
+      tags: prep
+
+    - name: "PREP | Format swapfile"
+      ansible.builtin.command:
+        cmd: mkswap /swapfile
+      when: not swapfile_stat.stat.exists
+      tags: prep
+
+    - name: "PREP | Enable swapfile"
+      ansible.builtin.command:
+        cmd: swapon /swapfile
+      when: not swapfile_stat.stat.exists
+      register: swapon_result
+      failed_when: swapon_result.rc != 0
+      tags: prep
+
+    - name: "PREP | Persist swapfile in fstab"
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        line: "/swapfile none swap sw 0 0"
+        state: present
+      tags: prep
+
+    - name: "PREP | Set vm.swappiness to 10 (reduce swap pressure)"
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: "10"
+        state: present
+        sysctl_set: true
+      tags: prep
+
+  # ===========================================================================
+  # BLOCK 2 — Volume mount (device path injected by Terraform → inventory.ini)
+  # ===========================================================================
+    - name: "VOLUME | Install filesystem utilities"
+      ansible.builtin.apt:
+        name: e2fsprogs
+        state: present
+      tags: volume
+
+    - name: "VOLUME | Create ext4 filesystem on volume (idempotent)"
+      community.general.filesystem:
+        fstype: ext4
+        dev: "{{ volume_device }}"
+        opts: "-L mailcow-data"
+      tags: volume
+
+    - name: "VOLUME | Create mount point"
+      ansible.builtin.file:
+        path: "{{ volume_mount }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      tags: volume
+
+    - name: "VOLUME | Mount volume and persist in fstab"
+      ansible.posix.mount:
+        path: "{{ volume_mount }}"
+        src: "{{ volume_device }}"
+        fstype: ext4
+        opts: "defaults,nofail"
+        state: mounted
+      tags: volume
+
+    - name: "VOLUME | Create Docker data-root dir on volume"
+      ansible.builtin.file:
+        path: "{{ volume_mount }}/docker"
+        state: directory
+        owner: root
+        group: root
+        mode: "0711"
+      tags: volume
+
+    - name: "VOLUME | Create backup dir on volume"
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      tags: volume
+
+  # ===========================================================================
+  # BLOCK 3 — Docker installation
+  # Docker's data-root is configured to the volume BEFORE Docker starts so
+  # all container/volume data lands on persistent storage from day one.
+  # ===========================================================================
+    - name: "DOCKER | Create apt keyring directory"
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+      tags: docker
+
+    - name: "DOCKER | Create /etc/docker config directory"
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        mode: "0755"
+      tags: docker
+
+    - name: "DOCKER | Download Docker GPG key"
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+      tags: docker
+
+    - name: "DOCKER | Add Docker apt repository"
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
+        state: present
+        filename: docker
+      tags: docker
+
+    - name: "DOCKER | Configure daemon (log rotation + data-root on volume)"
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        content: |
+          {
+            "data-root": "{{ volume_mount }}/docker",
+            "log-driver": "json-file",
+            "log-opts": {
+              "max-size": "{{ docker_log_max_size }}",
+              "max-file": "{{ docker_log_max_file }}"
+            }
+          }
+        mode: "0644"
+      notify: Restart Docker
+      tags: docker
+
+    - name: "DOCKER | Install Docker packages"
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+      tags: docker
+
+    - name: "DOCKER | Enable and start Docker"
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+      tags: docker
+
+    - name: "DOCKER | Flush handlers (ensure Docker is up with correct data-root)"
+      ansible.builtin.meta: flush_handlers
+      tags: docker
+
+  # ===========================================================================
+  # BLOCK 4 — Caddy edge proxy
+  # Handles public TLS termination for both the corporate site and mail UI.
+  # Mailcow binds on 127.0.0.1:8080 so Caddy proxies without port conflict.
+  # ===========================================================================
+    - name: "CADDY | Download Caddy signing key"
+      ansible.builtin.get_url:
+        url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+        dest: /tmp/caddy-gpg.key
+        mode: "0644"
+      tags: caddy
+
+    - name: "CADDY | Install Caddy signing key"
+      ansible.builtin.command:
+        cmd: gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg /tmp/caddy-gpg.key
+        creates: /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      tags: caddy
+
+    - name: "CADDY | Add Caddy apt repository"
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg]
+          https://dl.cloudsmith.io/public/caddy/stable/deb/debian
+          any-version main
+        state: present
+        filename: caddy-stable
+      tags: caddy
+
+    - name: "CADDY | Install Caddy"
+      ansible.builtin.apt:
+        name: caddy
+        state: present
+        update_cache: true
+      tags: caddy
+
+    - name: "CADDY | Create Caddy log directory"
+      ansible.builtin.file:
+        path: /var/log/caddy
+        state: directory
+        owner: caddy
+        group: caddy
+        mode: "0755"
+      tags: caddy
+
+    - name: "CADDY | Deploy Caddyfile from template"
+      ansible.builtin.template:
+        src: templates/Caddyfile.j2
+        dest: /etc/caddy/Caddyfile
+        owner: root
+        group: caddy
+        mode: "0644"
+        validate: caddy validate --config %s
+      notify: Reload Caddy
+      tags: caddy
+
+    - name: "CADDY | Enable and start Caddy"
+      ansible.builtin.service:
+        name: caddy
+        state: started
+        enabled: true
+      tags: caddy
+
+  # ===========================================================================
+  # BLOCK 5 — Mailcow provisioning
+  # ===========================================================================
+    - name: "MAILCOW | Clone mailcow-dockerized"
+      ansible.builtin.git:
+        repo: https://github.com/mailcow/mailcow-dockerized.git
+        dest: "{{ mailcow_dir }}"
+        version: "{{ mailcow_branch }}"
+        depth: 1
+        update: false
+      tags: mailcow
+
+    - name: "MAILCOW | Check if mailcow.conf already exists"
+      ansible.builtin.stat:
+        path: "{{ mailcow_dir }}/mailcow.conf"
+      register: mailcow_conf_stat
+      tags: mailcow
+
+    - name: "MAILCOW | Generate mailcow.conf (non-interactive via env vars)"
+      ansible.builtin.command:
+        cmd: bash generate_config.sh
+        chdir: "{{ mailcow_dir }}"
+        creates: "{{ mailcow_dir }}/mailcow.conf"
+      environment:
+        MAILCOW_HOSTNAME: "{{ mail_hostname }}"
+        MAILCOW_TZ: "{{ timezone }}"
+        DEBIAN_FRONTEND: noninteractive
+      when: not mailcow_conf_stat.stat.exists
+      tags: mailcow
+
+    # Patch mailcow.conf: bind HTTP/HTTPS to localhost so Caddy can own ports 80/443
+    - name: "MAILCOW | Bind HTTP to localhost:8080"
+      ansible.builtin.lineinfile:
+        path: "{{ mailcow_dir }}/mailcow.conf"
+        regexp: "^HTTP_PORT="
+        line: "HTTP_PORT=8080"
+      tags: mailcow
+
+    - name: "MAILCOW | Set HTTP bind address to localhost"
+      ansible.builtin.lineinfile:
+        path: "{{ mailcow_dir }}/mailcow.conf"
+        regexp: "^HTTP_BIND="
+        line: "HTTP_BIND=127.0.0.1"
+      tags: mailcow
+
+    - name: "MAILCOW | Bind HTTPS to localhost:8443"
+      ansible.builtin.lineinfile:
+        path: "{{ mailcow_dir }}/mailcow.conf"
+        regexp: "^HTTPS_PORT="
+        line: "HTTPS_PORT=8443"
+      tags: mailcow
+
+    - name: "MAILCOW | Set HTTPS bind address to localhost"
+      ansible.builtin.lineinfile:
+        path: "{{ mailcow_dir }}/mailcow.conf"
+        regexp: "^HTTPS_BIND="
+        line: "HTTPS_BIND=127.0.0.1"
+      tags: mailcow
+
+    - name: "MAILCOW | Disable internal Let's Encrypt (Caddy handles TLS)"
+      ansible.builtin.lineinfile:
+        path: "{{ mailcow_dir }}/mailcow.conf"
+        regexp: "^SKIP_LETS_ENCRYPT="
+        line: "SKIP_LETS_ENCRYPT=y"
+      tags: mailcow
+
+    - name: "MAILCOW | Disable ClamAV (RAM optimisation for 4 GB)"
+      ansible.builtin.lineinfile:
+        path: "{{ mailcow_dir }}/mailcow.conf"
+        regexp: "^SKIP_CLAMD="
+        line: "SKIP_CLAMD={{ skip_clamd }}"
+      tags: mailcow
+
+    - name: "MAILCOW | Set timezone in mailcow.conf"
+      ansible.builtin.lineinfile:
+        path: "{{ mailcow_dir }}/mailcow.conf"
+        regexp: "^TZ="
+        line: "TZ={{ timezone }}"
+      tags: mailcow
+
+  # ===========================================================================
+  # BLOCK 6 — Corporate website deployment
+  # ===========================================================================
+    - name: "WEB | Create web root directory"
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: caddy
+        group: caddy
+        mode: "0755"
+      tags: web
+
+    - name: "WEB | Sync static site from local dist/ to server"
+      ansible.posix.synchronize:
+        src: "{{ playbook_dir }}/../dist/"
+        dest: "{{ web_root }}/"
+        delete: true
+        recursive: true
+        rsync_opts:
+          - "--exclude=.gitkeep"
+      tags: web
+
+    - name: "WEB | Ensure correct ownership on web root"
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        owner: caddy
+        group: caddy
+        recurse: true
+      tags: web
+
+  # ===========================================================================
+  # BLOCK 7 — Backups
+  # Mailcow ships backup_and_restore.sh; we wire it into a daily cron job.
+  # rclone offsite push is documented in INSTRUCTIONS.md (requires cloud creds).
+  # ===========================================================================
+    - name: "BACKUP | Install daily Mailcow backup cron job"
+      ansible.builtin.cron:
+        name: "Mailcow daily backup"
+        user: root
+        hour: "2"
+        minute: "30"
+        job: >-
+          MAILCOW_BACKUP_LOCATION={{ backup_dir }}
+          /opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh backup all
+          >> /var/log/mailcow-backup.log 2>&1
+        state: present
+      tags: backup
+
+    - name: "BACKUP | Install weekly backup pruner (keep 7 days)"
+      ansible.builtin.cron:
+        name: "Mailcow backup pruner"
+        user: root
+        weekday: "0"
+        hour: "4"
+        minute: "0"
+        job: >-
+          find {{ backup_dir }} -type d -mtime +7
+          -exec rm -rf {} + >> /var/log/mailcow-backup.log 2>&1
+        state: present
+      tags: backup
+
+    - name: "BACKUP | Deploy rclone config template (edit to add remote credentials)"
+      ansible.builtin.copy:
+        dest: /root/.config/rclone/rclone.conf
+        content: |
+          # ============================================================
+          # rclone remote for offsite backup — fill in your credentials
+          # ============================================================
+          # Example for Backblaze B2:
+          #
+          # [b2]
+          # type = b2
+          # account = YOUR_ACCOUNT_ID
+          # key = YOUR_APPLICATION_KEY
+          #
+          # Then add to cron:
+          # 0 5 * * * rclone sync {{ backup_dir }} b2:your-bucket-name/mailcow/
+          # ============================================================
+        mode: "0600"
+        force: false     # Never overwrite if user has already configured it
+      tags: backup
+
+  # ===========================================================================
+  # BLOCK 8 — Start Mailcow cluster
+  # ===========================================================================
+    - name: "MAILCOW | Pull latest container images"
+      community.docker.docker_compose_v2:
+        project_src: "{{ mailcow_dir }}"
+        pull: always
+        state: present
+      tags: mailcow, deploy
+
+    - name: "CADDY | Reload Caddy to pick up final Caddyfile"
+      ansible.builtin.service:
+        name: caddy
+        state: reloaded
+      tags: caddy, deploy
