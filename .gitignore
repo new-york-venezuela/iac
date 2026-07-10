@@ -1,0 +1,71 @@
+# ============================================================
+# SECRETS — never commit
+# ============================================================
+.env
+*.tfvars
+!*.tfvars.example
+terraform.tfstate
+terraform.tfstate.backup
+*.tfplan
+.terraform.lock.hcl
+
+# ============================================================
+# TERRAFORM RUNTIME
+# ============================================================
+.terraform/
+*.tfstate.d/
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ============================================================
+# ANSIBLE — generated files
+# ============================================================
+ansible/inventory.ini
+ansible/*.retry
+*.vault_pass
+
+# ============================================================
+# SSH KEYS
+# ============================================================
+*.pem
+*.key
+id_rsa*
+id_dsa*
+id_ed25519*
+id_ecdsa*
+*.ppk
+
+# ============================================================
+# PYTHON / UV
+# ============================================================
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist-info/
+*.dist-info/
+.python-version
+
+# ============================================================
+# DIST ARTIFACTS — build output is not versioned here
+# dist/.gitkeep is tracked to preserve the empty directory.
+# ============================================================
+dist/*
+!dist/.gitkeep
+
+# ============================================================
+# OS / EDITORS
+# ============================================================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
