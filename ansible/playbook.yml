@@ -319,6 +319,13 @@
         state: present
       tags: backup
 
+    - name: "BACKUP | Ensure rclone config directory exists"
+      ansible.builtin.file:
+        path: /root/.config/rclone
+        state: directory
+        mode: "0700"
+      tags: backup
+
     - name: "BACKUP | Deploy rclone config template (edit to add remote credentials)"
       ansible.builtin.copy:
         dest: /root/.config/rclone/rclone.conf
