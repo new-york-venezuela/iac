@@ -35,7 +35,7 @@
     # -- Mailcow tuning --
     skip_clamd: "n"      # Disable ClamAV; set to "n" if RAM > 8 GB
     skip_rspamd: "n"
-    mailcow_branch: master
+    mailcow_branch: "2026-05c"
 
     # -- Docker --
     docker_log_max_size: "50m"
