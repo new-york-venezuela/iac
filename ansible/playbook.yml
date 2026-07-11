@@ -1,6 +1,6 @@
 ---
 # =============================================================================
-# Mailcow + Caddy server provisioning playbook
+# Mailcow
 # =============================================================================
 # Prerequisites:
 #   ansible-galaxy collection install -r ansible/requirements.yml
@@ -14,27 +14,26 @@
 # All vars below have sensible defaults; override via -e or group_vars/all.yml.
 # =============================================================================
 
-- name: Mailcow + Caddy server configuration
+- name: Mailcow
   hosts: mailserver
   become: true
 
   vars:
     # -- Company / domain settings (override per deployment) --
-    domain: "example.com"
-    admin_email: "admin@example.com"
-    timezone: "UTC"
+    domain: "alimentosnewyork.com"
+    admin_email: "it@alimentosnewyork.com"
+    timezone: "America/Caracas"
 
     # -- Derived values --
     mail_hostname: "mail.{{ domain }}"
 
     # -- Paths --
     mailcow_dir: /opt/mailcow-dockerized
-    web_root: /var/www/corporate-site
     volume_mount: /mnt/mailcow-data
     backup_dir: /mnt/mailcow-data/backups
 
     # -- Mailcow tuning --
-    skip_clamd: "y"      # Disable ClamAV; set to "n" if RAM > 8 GB
+    skip_clamd: "n"      # Disable ClamAV; set to "n" if RAM > 8 GB
     skip_rspamd: "n"
     mailcow_branch: master
 
@@ -83,6 +82,7 @@
           - nftables
           - fail2ban
           - unattended-upgrades
+          - jq
         state: present
       tags: prep
 
@@ -272,69 +272,7 @@
       tags: docker
 
   # ===========================================================================
-  # BLOCK 4 — Caddy edge proxy
-  # Handles public TLS termination for both the corporate site and mail UI.
-  # Mailcow binds on 127.0.0.1:8080 so Caddy proxies without port conflict.
-  # ===========================================================================
-    - name: "CADDY | Download Caddy signing key"
-      ansible.builtin.get_url:
-        url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
-        dest: /tmp/caddy-gpg.key
-        mode: "0644"
-      tags: caddy
-
-    - name: "CADDY | Install Caddy signing key"
-      ansible.builtin.command:
-        cmd: gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg /tmp/caddy-gpg.key
-        creates: /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-      tags: caddy
-
-    - name: "CADDY | Add Caddy apt repository"
-      ansible.builtin.apt_repository:
-        repo: >-
-          deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg]
-          https://dl.cloudsmith.io/public/caddy/stable/deb/debian
-          any-version main
-        state: present
-        filename: caddy-stable
-      tags: caddy
-
-    - name: "CADDY | Install Caddy"
-      ansible.builtin.apt:
-        name: caddy
-        state: present
-        update_cache: true
-      tags: caddy
-
-    - name: "CADDY | Create Caddy log directory"
-      ansible.builtin.file:
-        path: /var/log/caddy
-        state: directory
-        owner: caddy
-        group: caddy
-        mode: "0755"
-      tags: caddy
-
-    - name: "CADDY | Deploy Caddyfile from template"
-      ansible.builtin.template:
-        src: templates/Caddyfile.j2
-        dest: /etc/caddy/Caddyfile
-        owner: root
-        group: caddy
-        mode: "0644"
-        validate: caddy validate --config %s
-      notify: Reload Caddy
-      tags: caddy
-
-    - name: "CADDY | Enable and start Caddy"
-      ansible.builtin.service:
-        name: caddy
-        state: started
-        enabled: true
-      tags: caddy
-
-  # ===========================================================================
-  # BLOCK 5 — Mailcow provisioning
+  # BLOCK 4 — Mailcow provisioning
   # ===========================================================================
     - name: "MAILCOW | Clone mailcow-dockerized"
       ansible.builtin.git:
@@ -360,6 +298,7 @@
         MAILCOW_HOSTNAME: "{{ mail_hostname }}"
         MAILCOW_TZ: "{{ timezone }}"
         DEBIAN_FRONTEND: noninteractive
+        MAILCOW_BRANCH: "{{ mailcow_branch }}"
       when: not mailcow_conf_stat.stat.exists
       tags: mailcow
 
@@ -392,11 +331,11 @@
         line: "HTTPS_BIND=127.0.0.1"
       tags: mailcow
 
-    - name: "MAILCOW | Disable internal Let's Encrypt (Caddy handles TLS)"
+    - name: "MAILCOW | Enable internal Let's Encrypt"
       ansible.builtin.lineinfile:
         path: "{{ mailcow_dir }}/mailcow.conf"
         regexp: "^SKIP_LETS_ENCRYPT="
-        line: "SKIP_LETS_ENCRYPT=y"
+        line: "SKIP_LETS_ENCRYPT=n"
       tags: mailcow
 
     - name: "MAILCOW | Disable ClamAV (RAM optimisation for 4 GB)"
@@ -414,37 +353,7 @@
       tags: mailcow
 
   # ===========================================================================
-  # BLOCK 6 — Corporate website deployment
-  # ===========================================================================
-    - name: "WEB | Create web root directory"
-      ansible.builtin.file:
-        path: "{{ web_root }}"
-        state: directory
-        owner: caddy
-        group: caddy
-        mode: "0755"
-      tags: web
-
-    - name: "WEB | Sync static site from local dist/ to server"
-      ansible.posix.synchronize:
-        src: "{{ playbook_dir }}/../dist/"
-        dest: "{{ web_root }}/"
-        delete: true
-        recursive: true
-        rsync_opts:
-          - "--exclude=.gitkeep"
-      tags: web
-
-    - name: "WEB | Ensure correct ownership on web root"
-      ansible.builtin.file:
-        path: "{{ web_root }}"
-        owner: caddy
-        group: caddy
-        recurse: true
-      tags: web
-
-  # ===========================================================================
-  # BLOCK 7 — Backups
+  # BLOCK 5 — Backups
   # Mailcow ships backup_and_restore.sh; we wire it into a daily cron job.
   # rclone offsite push is documented in INSTRUCTIONS.md (requires cloud creds).
   # ===========================================================================

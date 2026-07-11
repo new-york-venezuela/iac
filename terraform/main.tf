@@ -25,22 +25,6 @@ data "hcloud_ssh_key" "deployer" {
 }
 
 # ---------------------------------------------------------------------------
-# Block storage volume — all mailcow/Docker data lives here
-# ---------------------------------------------------------------------------
-resource "hcloud_volume" "mailcow_data" {
-  name      = "${var.company_name}-mailcow-data"
-  size      = var.volume_size_gb
-  location  = var.server_location
-  format    = "ext4"
-
-  labels = {
-    managed-by = "terraform"
-    company    = var.company_name
-    role       = "mailcow-data"
-  }
-}
-
-# ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
 resource "hcloud_server" "mailcow" {
@@ -49,10 +33,6 @@ resource "hcloud_server" "mailcow" {
   image       = var.server_image
   location    = var.server_location
   ssh_keys    = [data.hcloud_ssh_key.deployer.id]
-
-  # Attach the block volume at provisioning time so the device is stable
-  # before Ansible touches the filesystem.
-  volumes = [hcloud_volume.mailcow_data.id]
 
   user_data = <<-EOT
     #cloud-config
@@ -65,6 +45,22 @@ resource "hcloud_server" "mailcow" {
     managed-by = "terraform"
     company    = var.company_name
     role       = "mailcow"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Block storage volume — all mailcow/Docker data lives here
+# ---------------------------------------------------------------------------
+resource "hcloud_volume" "mailcow_data" {
+  name      = "${var.company_name}-mailcow-data"
+  server_id = hcloud_server.mailcow.id
+  size      = var.volume_size_gb
+  format    = "ext4"
+
+  labels = {
+    managed-by = "terraform"
+    company    = var.company_name
+    role       = "mailcow-data"
   }
 }
 
