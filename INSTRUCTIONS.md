@@ -29,11 +29,11 @@ Complete runbook for deploying and maintaining a Mailcow + Caddy stack on Hetzne
 
 ```bash
 # From repo root
-uv sync                          # Creates .venv/ and installs ansible + ansible-lint
+uv sync                          # Provisions Python 3.13 (pinned) and installs ansible + ansible-lint + netaddr
 source .venv/bin/activate        # Activate
 
-# Install Ansible Galaxy collections
-ansible-galaxy collection install -r ansible/requirements.yml
+# Install Ansible Galaxy collections + the official mailcow role
+ansible-galaxy install -r ansible/requirements.yml
 ```
 
 ---
@@ -113,7 +113,7 @@ ansible-playbook ... --tags web
 # Re-apply Caddy config after Caddyfile edit
 ansible-playbook ... --tags caddy
 
-# Re-run Mailcow config patches only
+# Re-run the mailcow role only (config patches + start/update stack)
 ansible-playbook ... --tags mailcow
 ```
 
@@ -220,6 +220,17 @@ MAILCOW_BACKUP_LOCATION=/mnt/mailcow-data/backups \
 ## Maintenance
 
 ### Updating Mailcow
+
+Re-running the playbook applies updates automatically: the `mailcow.mailcow`
+role runs mailcow's official `update.sh` when the stack is already running
+(`mailcow__install_updates: true`).
+
+```bash
+ansible-playbook -i ansible/inventory.ini ansible/playbook.yml \
+  -e domain="${TF_VAR_domain}" --tags mailcow
+```
+
+Manual alternative:
 
 ```bash
 ssh root@<server-ip>

@@ -50,7 +50,6 @@ __pycache__/
 *.egg-info/
 dist-info/
 *.dist-info/
-.python-version
 
 # ============================================================
 # DIST ARTIFACTS — build output is not versioned here

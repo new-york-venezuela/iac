@@ -1,5 +1,6 @@
 ---
-# Install with: ansible-galaxy collection install -r ansible/requirements.yml
+# Install with: ansible-galaxy install -r ansible/requirements.yml
+# (installs both the collections and the mailcow role below)
 collections:
   - name: community.docker
     version: ">=3.4.0"
@@ -7,3 +8,14 @@ collections:
     version: ">=8.0.0"
   - name: ansible.posix
     version: ">=1.5.0"
+  # Required by the mailcow role (ansible.utils.ipaddr filter; needs the
+  # netaddr Python package on the control node — installed via uv sync)
+  - name: ansible.utils
+    version: ">=4.0.0"
+
+roles:
+  # Official Mailcow role — no tagged releases upstream, so pin to a commit
+  - name: mailcow.mailcow
+    src: https://github.com/mailcow/mailcow-ansiblerole.git
+    scm: git
+    version: 68e22c791a7c597009ef815844b333d23141888f  # master @ 2025-11-04

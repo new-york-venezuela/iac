@@ -3,7 +3,7 @@
 # Mailcow
 # =============================================================================
 # Prerequisites:
-#   ansible-galaxy collection install -r ansible/requirements.yml
+#   ansible-galaxy install -r ansible/requirements.yml   # collections + mailcow role
 #
 # Run:
 #   ansible-playbook -i ansible/inventory.ini ansible/playbook.yml \
@@ -35,26 +35,27 @@
     # -- Mailcow tuning --
     skip_clamd: "n"      # Disable ClamAV; set to "n" if RAM > 8 GB
     skip_rspamd: "n"
-    mailcow_branch: master
+    mailcow_branch: "2026-05c"
 
     # -- Docker --
     docker_log_max_size: "50m"
     docker_log_max_file: "3"
 
+    # -- mailcow.mailcow role wiring (see ansible/requirements.yml) --
+    mailcow__hostname: "{{ mail_hostname }}"
+    mailcow__timezone: "{{ timezone }}"
+    mailcow__install_path: "{{ mailcow_dir }}"
+    mailcow__git_version: "{{ mailcow_branch }}"
+    # Let mailcow's acme-mailcow handle TLS directly
+    mailcow__config_skip_lets_encrypt: "n"
+    mailcow__config_skip_clamd: "{{ skip_clamd }}"
+    # On re-runs against a running stack, apply mailcow's official update.sh
+    mailcow__install_updates: true
+
   handlers:
     - name: Restart Docker
       ansible.builtin.service:
         name: docker
-        state: restarted
-
-    - name: Reload Caddy
-      ansible.builtin.service:
-        name: caddy
-        state: reloaded
-
-    - name: Restart Caddy
-      ansible.builtin.service:
-        name: caddy
         state: restarted
 
   # ===========================================================================
@@ -78,6 +79,7 @@
           - gnupg
           - apt-transport-https
           - python3-pip
+          - python3-requests   # needed by community.docker modules (mailcow role)
           - python3-venv
           - nftables
           - fail2ban
@@ -105,6 +107,7 @@
       ansible.builtin.command:
         cmd: fallocate -l 4G /swapfile
       when: not swapfile_stat.stat.exists
+      changed_when: true
       tags: prep
 
     - name: "PREP | Lock down swapfile permissions"
@@ -119,6 +122,7 @@
       ansible.builtin.command:
         cmd: mkswap /swapfile
       when: not swapfile_stat.stat.exists
+      changed_when: true
       tags: prep
 
     - name: "PREP | Enable swapfile"
@@ -127,6 +131,7 @@
       when: not swapfile_stat.stat.exists
       register: swapon_result
       failed_when: swapon_result.rc != 0
+      changed_when: true
       tags: prep
 
     - name: "PREP | Persist swapfile in fstab"
@@ -272,85 +277,16 @@
       tags: docker
 
   # ===========================================================================
-  # BLOCK 4 — Mailcow provisioning
+  # BLOCK 4 — Mailcow provisioning (official mailcow.mailcow role)
+  # The role clones mailcow-dockerized, generates mailcow.conf, applies the
+  # mailcow__config_* settings from vars above, starts the compose stack on
+  # fresh installs, and runs mailcow's update.sh on subsequent runs.
+  # Docker must already be installed (BLOCK 3).
   # ===========================================================================
-    - name: "MAILCOW | Clone mailcow-dockerized"
-      ansible.builtin.git:
-        repo: https://github.com/mailcow/mailcow-dockerized.git
-        dest: "{{ mailcow_dir }}"
-        version: "{{ mailcow_branch }}"
-        depth: 1
-        update: false
-      tags: mailcow
-
-    - name: "MAILCOW | Check if mailcow.conf already exists"
-      ansible.builtin.stat:
-        path: "{{ mailcow_dir }}/mailcow.conf"
-      register: mailcow_conf_stat
-      tags: mailcow
-
-    - name: "MAILCOW | Generate mailcow.conf (non-interactive via env vars)"
-      ansible.builtin.command:
-        cmd: bash generate_config.sh
-        chdir: "{{ mailcow_dir }}"
-        creates: "{{ mailcow_dir }}/mailcow.conf"
-      environment:
-        MAILCOW_HOSTNAME: "{{ mail_hostname }}"
-        MAILCOW_TZ: "{{ timezone }}"
-        DEBIAN_FRONTEND: noninteractive
-        MAILCOW_BRANCH: "{{ mailcow_branch }}"
-      when: not mailcow_conf_stat.stat.exists
-      tags: mailcow
-
-    # Patch mailcow.conf: bind HTTP/HTTPS to localhost so Caddy can own ports 80/443
-    - name: "MAILCOW | Bind HTTP to localhost:8080"
-      ansible.builtin.lineinfile:
-        path: "{{ mailcow_dir }}/mailcow.conf"
-        regexp: "^HTTP_PORT="
-        line: "HTTP_PORT=8080"
-      tags: mailcow
-
-    - name: "MAILCOW | Set HTTP bind address to localhost"
-      ansible.builtin.lineinfile:
-        path: "{{ mailcow_dir }}/mailcow.conf"
-        regexp: "^HTTP_BIND="
-        line: "HTTP_BIND=127.0.0.1"
-      tags: mailcow
-
-    - name: "MAILCOW | Bind HTTPS to localhost:8443"
-      ansible.builtin.lineinfile:
-        path: "{{ mailcow_dir }}/mailcow.conf"
-        regexp: "^HTTPS_PORT="
-        line: "HTTPS_PORT=8443"
-      tags: mailcow
-
-    - name: "MAILCOW | Set HTTPS bind address to localhost"
-      ansible.builtin.lineinfile:
-        path: "{{ mailcow_dir }}/mailcow.conf"
-        regexp: "^HTTPS_BIND="
-        line: "HTTPS_BIND=127.0.0.1"
-      tags: mailcow
-
-    - name: "MAILCOW | Enable internal Let's Encrypt"
-      ansible.builtin.lineinfile:
-        path: "{{ mailcow_dir }}/mailcow.conf"
-        regexp: "^SKIP_LETS_ENCRYPT="
-        line: "SKIP_LETS_ENCRYPT=n"
-      tags: mailcow
-
-    - name: "MAILCOW | Disable ClamAV (RAM optimisation for 4 GB)"
-      ansible.builtin.lineinfile:
-        path: "{{ mailcow_dir }}/mailcow.conf"
-        regexp: "^SKIP_CLAMD="
-        line: "SKIP_CLAMD={{ skip_clamd }}"
-      tags: mailcow
-
-    - name: "MAILCOW | Set timezone in mailcow.conf"
-      ansible.builtin.lineinfile:
-        path: "{{ mailcow_dir }}/mailcow.conf"
-        regexp: "^TZ="
-        line: "TZ={{ timezone }}"
-      tags: mailcow
+    - name: "MAILCOW | Provision via official mailcow role"
+      ansible.builtin.import_role:
+        name: mailcow.mailcow
+      tags: mailcow, deploy
 
   # ===========================================================================
   # BLOCK 5 — Backups
@@ -365,7 +301,7 @@
         minute: "30"
         job: >-
           MAILCOW_BACKUP_LOCATION={{ backup_dir }}
-          /opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh backup all
+          {{ mailcow_dir }}/helper-scripts/backup_and_restore.sh backup all
           >> /var/log/mailcow-backup.log 2>&1
         state: present
       tags: backup
@@ -403,19 +339,3 @@
         mode: "0600"
         force: false     # Never overwrite if user has already configured it
       tags: backup
-
-  # ===========================================================================
-  # BLOCK 8 — Start Mailcow cluster
-  # ===========================================================================
-    - name: "MAILCOW | Pull latest container images"
-      community.docker.docker_compose_v2:
-        project_src: "{{ mailcow_dir }}"
-        pull: always
-        state: present
-      tags: mailcow, deploy
-
-    - name: "CADDY | Reload Caddy to pick up final Caddyfile"
-      ansible.builtin.service:
-        name: caddy
-        state: reloaded
-      tags: caddy, deploy
