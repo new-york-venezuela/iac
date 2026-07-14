@@ -10,11 +10,25 @@ terraform {
       source  = "hashicorp/local"
       version = "~> 2.5"
     }
+    b2 = {
+      source  = "Backblaze/b2"
+      version = "~> 0.9"
+    }
   }
 }
 
 provider "hcloud" {
   token = var.hcloud_token
+}
+
+provider "b2" {
+  application_key_id = var.b2_key_id
+  application_key    = var.b2_application_key
+}
+
+locals {
+  b2_bucket_name         = var.b2_bucket_name != "" ? var.b2_bucket_name : "mailcow-backup-${var.company_name}"
+  b2_tfstate_bucket_name = var.b2_tfstate_bucket_name != "" ? var.b2_tfstate_bucket_name : "mailcow-tfstate-${var.company_name}"
 }
 
 # ---------------------------------------------------------------------------
@@ -146,12 +160,34 @@ resource "hcloud_firewall" "mailcow" {
 }
 
 # ---------------------------------------------------------------------------
+# Backblaze B2 backup bucket (created only when b2_enabled = true)
+# ---------------------------------------------------------------------------
+resource "b2_bucket" "backup" {
+  count       = var.b2_enabled ? 1 : 0
+  bucket_name = local.b2_bucket_name
+  bucket_type = "allPrivate"
+}
+
+# ---------------------------------------------------------------------------
+# Backblaze B2 tfstate bucket (created only when b2_enabled = true)
+# ---------------------------------------------------------------------------
+resource "b2_bucket" "tfstate" {
+  count       = var.b2_enabled ? 1 : 0
+  bucket_name = local.b2_tfstate_bucket_name
+  bucket_type = "allPrivate"
+}
+
+# ---------------------------------------------------------------------------
 # Ansible inventory — generated after server IP is known
 # ---------------------------------------------------------------------------
 resource "local_file" "ansible_inventory" {
   content = <<-EOT
     [mailserver]
     ${hcloud_server.mailcow.ipv4_address} ansible_user=root volume_device=${hcloud_volume.mailcow_data.linux_device}
+
+    [mailserver:vars]
+    b2_enabled=${var.b2_enabled}
+    b2_bucket=${local.b2_bucket_name}
   EOT
   filename        = "${path.module}/../ansible/inventory.ini"
   file_permission = "0600"

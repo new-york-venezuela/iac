@@ -76,3 +76,38 @@ variable "allowed_ssh_cidrs" {
   type        = list(string)
   default     = ["0.0.0.0/0", "::/0"]
 }
+
+# ---------------------------------------------------------------------------
+# Backblaze B2 (optional offsite backup storage)
+# ---------------------------------------------------------------------------
+variable "b2_enabled" {
+  description = "Create a Backblaze B2 bucket for offsite backups. Requires b2_key_id and b2_application_key."
+  type        = bool
+  default     = false
+}
+
+variable "b2_key_id" {
+  description = "Backblaze B2 application key ID. Set via TF_VAR_b2_key_id or .env."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "b2_application_key" {
+  description = "Backblaze B2 application key. Set via TF_VAR_b2_application_key or .env."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "b2_bucket_name" {
+  description = "B2 bucket name. Defaults to mailcow-backup-{company_name} if empty. Must be globally unique across all B2 accounts."
+  type        = string
+  default     = ""
+}
+
+variable "b2_tfstate_bucket_name" {
+  description = "B2 bucket name for Terraform state. Defaults to mailcow-tfstate-{company_name} if empty. Must be globally unique across all B2 accounts."
+  type        = string
+  default     = ""
+}

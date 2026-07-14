@@ -28,6 +28,16 @@ output "ansible_inventory_path" {
   value       = local_file.ansible_inventory.filename
 }
 
+output "b2_bucket_name" {
+  description = "Backblaze B2 backup bucket name. Empty string if b2_enabled = false."
+  value       = var.b2_enabled ? b2_bucket.backup[0].bucket_name : ""
+}
+
+output "b2_tfstate_bucket_name" {
+  description = "Backblaze B2 tfstate bucket name. Empty string if b2_enabled = false."
+  value       = var.b2_enabled ? b2_bucket.tfstate[0].bucket_name : ""
+}
+
 output "post_apply_dns_notice" {
   description = "Reminder: point DNS A records at the server IP before running Ansible."
   value = <<-EOT

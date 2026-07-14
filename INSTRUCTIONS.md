@@ -66,6 +66,44 @@ source .env
 
 ---
 
+## Step 2b — Backblaze B2 (optional offsite backup)
+
+If you want automated offsite backups to Backblaze B2:
+
+1. Create a Backblaze account at [backblaze.com](https://www.backblaze.com/)
+2. Go to **Account → App Keys → Add a New Application Key**
+   - Give it a name (e.g. `mailcow-backup`)
+   - Allow access to **All Buckets** (so Terraform can create the bucket), or scope to a specific bucket after creation
+   - Enable **Read and Write** on Files and Buckets
+3. Copy the Key ID and Application Key into `.env`:
+   ```bash
+   export B2_APPLICATION_KEY_ID="..."
+   export B2_APPLICATION_KEY="..."
+   export TF_VAR_b2_enabled="true"
+   ```
+4. Re-source `.env` and re-run Terraform — it will create the bucket
+5. Re-run Ansible — it will configure rclone and the daily offsite sync cron
+
+> **Bucket naming:** B2 bucket names are globally unique across all B2 accounts. The default `mailcow-backup-{company_name}` may already be taken. Set `TF_VAR_b2_bucket_name` to a unique name if needed.
+
+---
+
+## Step 2c — Terraform State Backend (optional, B2)
+
+To store Terraform state in Backblaze B2 instead of locally, follow the **[B2-TFSTATE-MIGRATION.md](B2-TFSTATE-MIGRATION.md)** guide.
+
+**Quick overview:**
+1. Enable B2 in Step 2b
+2. Run `terraform apply` to create both backup and tfstate buckets
+3. Source `.env` to load AWS credentials (aliased from B2 app keys)
+4. Run `terraform init -migrate-state -backend-config="bucket=mailcow-tfstate-{company_name}"` to move state to B2
+5. Verify with `terraform state list` and `terraform plan`
+
+**First deployment (no existing state):** State starts local after `terraform init`, then migrates to B2 after first `apply`.  
+**Existing deployment:** Follow [B2-TFSTATE-MIGRATION.md](B2-TFSTATE-MIGRATION.md) for step-by-step migration.
+
+---
+
 ## Step 3 — Terraform (provision infrastructure)
 
 ```bash
@@ -101,7 +139,9 @@ ansible -i ansible/inventory.ini mailserver -m ping
 ansible-playbook -i ansible/inventory.ini ansible/playbook.yml \
   -e domain="${TF_VAR_domain}" \
   -e admin_email="${TF_VAR_admin_email}" \
-  -e timezone="${TF_VAR_timezone}"
+  -e timezone="${TF_VAR_timezone}" \
+  -e b2_key_id="${B2_APPLICATION_KEY_ID}" \
+  -e b2_application_key="${B2_APPLICATION_KEY}"
 ```
 
 The playbook is **fully idempotent** — safe to re-run. Tags let you target specific blocks:
@@ -178,24 +218,36 @@ tail -f /var/log/mailcow-backup.log
 ls -lh /mnt/mailcow-data/backups/
 ```
 
-### Offsite Push with rclone
+### Offsite Push with Backblaze B2 (automated)
 
-Ansible drops a template at `/root/.config/rclone/rclone.conf`. Edit it on the server to add your cloud storage credentials (Backblaze B2 example):
+When `b2_enabled = true` in Terraform, Ansible automatically:
 
-```ini
-[b2]
-type = b2
-account = YOUR_ACCOUNT_ID
-key = YOUR_APPLICATION_KEY
+1. Writes `/root/.config/rclone/rclone.conf` with B2 credentials (mode 0600)
+2. Installs a daily cron at **05:00 UTC** that syncs to B2:
+
+```
+rclone sync /mnt/mailcow-data/backups b2:<bucket>/mailcow/
 ```
 
-Then add an offsite cron (as root on the server):
+Logs go to `/var/log/rclone-backup.log`.
 
+**Monitor:**
 ```bash
-crontab -e
-# Add:
-0 5 * * * rclone sync /mnt/mailcow-data/backups b2:your-bucket/mailcow/ >> /var/log/rclone-backup.log 2>&1
+tail -f /var/log/rclone-backup.log
+rclone lsd b2:<bucket-name>/mailcow/
 ```
+
+**Verify remote contents:**
+```bash
+rclone ls b2:<bucket-name>/mailcow/
+```
+
+**Terraform state backup:**
+- If using B2 state backend (Step 2c), state is automatically synced — no manual action needed
+- If using local state: after each `terraform apply`, manually backup:
+  ```bash
+  rclone copy terraform/terraform.tfstate b2:mailcow-tfstate-{company_name}/
+  ```
 
 ### Backup Restoration
 
@@ -214,6 +266,66 @@ MAILCOW_BACKUP_LOCATION=/mnt/mailcow-data/backups \
 ```
 
 > **Test restores regularly.** A backup never tested is not a backup.
+
+### Testing Backups Periodically
+
+**Schedule:** Test backups monthly (or after any major Mailcow config change).
+
+**Quick verification (5 min):**
+
+1. Check local backup directory exists and contains recent files:
+   ```bash
+   ssh root@<server-ip>
+   ls -lh /mnt/mailcow-data/backups/ | head -5
+   ```
+
+2. Verify cron jobs ran:
+   ```bash
+   # Local backup (should show 02:30 UTC daily)
+   ssh root@<server-ip> grep -i backup /var/log/syslog | tail -3
+   
+   # Offsite sync to B2 (should show 05:00 UTC daily)
+   ssh root@<server-ip> tail -20 /var/log/rclone-backup.log
+   ```
+
+3. Verify B2 has recent files:
+   ```bash
+   # From local machine (requires rclone + B2 creds)
+   rclone ls b2:<bucket-name>/mailcow/ | tail -5
+   ```
+
+**Full restore test (30 min, monthly):**
+
+1. List available backups:
+   ```bash
+   ssh root@<server-ip>
+   ls /mnt/mailcow-data/backups/ | grep -E 'backup_[0-9]' | tail -3
+   ```
+
+2. On a dev machine or test volume, restore a backup:
+   ```bash
+   # Download from B2 to test directory
+   rclone sync b2:<bucket-name>/mailcow/ ./test-restore/
+   
+   # Or restore directly on server (takes downtime):
+   ssh root@<server-ip>
+   MAILCOW_BACKUP_LOCATION=/mnt/mailcow-data/backups \
+     /opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh restore
+   ```
+
+3. Verify restore integrity:
+   - Check mail delivery works
+   - Confirm user accounts and domains are present
+   - Test webmail login
+   - Check file attachments were restored
+
+**Log backup failures:**
+
+If either cron fails, logs show why:
+```bash
+ssh root@<server-ip> grep ERROR /var/log/mailcow-backup.log
+ssh root@<server-ip> grep ERROR /var/log/rclone-backup.log
+```
 
 ---
 
