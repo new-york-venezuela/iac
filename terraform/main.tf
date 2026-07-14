@@ -169,15 +169,6 @@ resource "b2_bucket" "backup" {
 }
 
 # ---------------------------------------------------------------------------
-# Backblaze B2 tfstate bucket (created only when b2_enabled = true)
-# ---------------------------------------------------------------------------
-resource "b2_bucket" "tfstate" {
-  count       = var.b2_enabled ? 1 : 0
-  bucket_name = local.b2_tfstate_bucket_name
-  bucket_type = "allPrivate"
-}
-
-# ---------------------------------------------------------------------------
 # Ansible inventory — generated after server IP is known
 # ---------------------------------------------------------------------------
 resource "local_file" "ansible_inventory" {

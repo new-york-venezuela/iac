@@ -332,6 +332,23 @@
         mode: "0700"
       tags: backup
 
+    - name: "BACKUP | Install logrotate config for cron logs"
+      ansible.builtin.copy:
+        dest: /etc/logrotate.d/mailcow-backup
+        content: |
+          /var/log/mailcow-backup.log
+          /var/log/rclone-backup.log
+          {
+            daily
+            rotate 7
+            compress
+            delaycompress
+            missingok
+            notifempty
+          }
+        mode: "0644"
+      tags: backup
+
     - name: "BACKUP | Validate B2 credentials are present when B2 is enabled"
       ansible.builtin.assert:
         that:
