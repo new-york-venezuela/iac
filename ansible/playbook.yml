@@ -41,6 +41,12 @@
     docker_log_max_size: "50m"
     docker_log_max_file: "3"
 
+    # -- Backblaze B2 offsite backups (overridden by inventory + extra-vars) --
+    b2_enabled: false
+    b2_bucket: ""
+    b2_key_id: ""
+    b2_application_key: ""
+
     # -- mailcow.mailcow role wiring (see ansible/requirements.yml) --
     mailcow__hostname: "{{ mail_hostname }}"
     mailcow__timezone: "{{ timezone }}"
@@ -326,23 +332,53 @@
         mode: "0700"
       tags: backup
 
-    - name: "BACKUP | Deploy rclone config template (edit to add remote credentials)"
+    - name: "BACKUP | Validate B2 credentials are present when B2 is enabled"
+      ansible.builtin.assert:
+        that:
+          - b2_key_id != ""
+          - b2_application_key != ""
+        fail_msg: >-
+          b2_enabled is true but b2_key_id or b2_application_key is missing.
+          Pass them with: -e b2_key_id=$B2_APPLICATION_KEY_ID -e b2_application_key=$B2_APPLICATION_KEY
+      when: b2_enabled | bool
+      tags: backup
+
+    - name: "BACKUP | Configure rclone for Backblaze B2"
+      ansible.builtin.copy:
+        dest: /root/.config/rclone/rclone.conf
+        content: |
+          [b2]
+          type = b2
+          account = {{ b2_key_id }}
+          key = {{ b2_application_key }}
+        mode: "0600"
+      when: b2_enabled | bool
+      no_log: true
+      tags: backup
+
+    - name: "BACKUP | Deploy rclone placeholder config (B2 disabled)"
       ansible.builtin.copy:
         dest: /root/.config/rclone/rclone.conf
         content: |
           # ============================================================
           # rclone remote for offsite backup — fill in your credentials
           # ============================================================
-          # Example for Backblaze B2:
-          #
-          # [b2]
-          # type = b2
-          # account = YOUR_ACCOUNT_ID
-          # key = YOUR_APPLICATION_KEY
-          #
-          # Then add to cron:
-          # 0 5 * * * rclone sync {{ backup_dir }} b2:your-bucket-name/mailcow/
+          # Set b2_enabled=true in Terraform and re-run Ansible to
+          # configure this automatically for Backblaze B2.
           # ============================================================
         mode: "0600"
-        force: false     # Never overwrite if user has already configured it
+        force: false
+      when: not (b2_enabled | bool)
+      tags: backup
+
+    - name: "BACKUP | Install rclone B2 offsite sync cron"
+      ansible.builtin.cron:
+        name: "Mailcow B2 offsite sync"
+        user: root
+        hour: "5"
+        minute: "0"
+        job: >-
+          rclone sync {{ backup_dir }} b2:{{ b2_bucket }}/mailcow/
+          >> /var/log/rclone-backup.log 2>&1
+        state: "{{ 'present' if (b2_enabled | bool) else 'absent' }}"
       tags: backup

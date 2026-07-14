@@ -66,6 +66,28 @@ source .env
 
 ---
 
+## Step 2b — Backblaze B2 (optional offsite backup)
+
+If you want automated offsite backups to Backblaze B2:
+
+1. Create a Backblaze account at [backblaze.com](https://www.backblaze.com/)
+2. Go to **Account → App Keys → Add a New Application Key**
+   - Give it a name (e.g. `mailcow-backup`)
+   - Allow access to **All Buckets** (so Terraform can create the bucket), or scope to a specific bucket after creation
+   - Enable **Read and Write** on Files and Buckets
+3. Copy the Key ID and Application Key into `.env`:
+   ```bash
+   export B2_APPLICATION_KEY_ID="..."
+   export B2_APPLICATION_KEY="..."
+   export TF_VAR_b2_enabled="true"
+   ```
+4. Re-source `.env` and re-run Terraform — it will create the bucket
+5. Re-run Ansible — it will configure rclone and the daily offsite sync cron
+
+> **Bucket naming:** B2 bucket names are globally unique across all B2 accounts. The default `mailcow-backup-{company_name}` may already be taken. Set `TF_VAR_b2_bucket_name` to a unique name if needed.
+
+---
+
 ## Step 3 — Terraform (provision infrastructure)
 
 ```bash
@@ -101,7 +123,9 @@ ansible -i ansible/inventory.ini mailserver -m ping
 ansible-playbook -i ansible/inventory.ini ansible/playbook.yml \
   -e domain="${TF_VAR_domain}" \
   -e admin_email="${TF_VAR_admin_email}" \
-  -e timezone="${TF_VAR_timezone}"
+  -e timezone="${TF_VAR_timezone}" \
+  -e b2_key_id="${B2_APPLICATION_KEY_ID}" \
+  -e b2_application_key="${B2_APPLICATION_KEY}"
 ```
 
 The playbook is **fully idempotent** — safe to re-run. Tags let you target specific blocks:
@@ -178,23 +202,33 @@ tail -f /var/log/mailcow-backup.log
 ls -lh /mnt/mailcow-data/backups/
 ```
 
-### Offsite Push with rclone
+### Offsite Push with Backblaze B2 (automated)
 
-Ansible drops a template at `/root/.config/rclone/rclone.conf`. Edit it on the server to add your cloud storage credentials (Backblaze B2 example):
+When `b2_enabled = true` in Terraform, Ansible automatically:
 
-```ini
-[b2]
-type = b2
-account = YOUR_ACCOUNT_ID
-key = YOUR_APPLICATION_KEY
+1. Writes `/root/.config/rclone/rclone.conf` with B2 credentials (mode 0600)
+2. Installs a daily cron at **05:00 UTC** that syncs to B2:
+
+```
+rclone sync /mnt/mailcow-data/backups b2:<bucket>/mailcow/
 ```
 
-Then add an offsite cron (as root on the server):
+Logs go to `/var/log/rclone-backup.log`.
 
+**Monitor:**
 ```bash
-crontab -e
-# Add:
-0 5 * * * rclone sync /mnt/mailcow-data/backups b2:your-bucket/mailcow/ >> /var/log/rclone-backup.log 2>&1
+tail -f /var/log/rclone-backup.log
+rclone lsd b2:<bucket-name>/mailcow/
+```
+
+**Verify remote contents:**
+```bash
+rclone ls b2:<bucket-name>/mailcow/
+```
+
+**Terraform state backup** (manual, run after each `terraform apply`):
+```bash
+rclone copy terraform/terraform.tfstate b2:<bucket-name>/tfstate/
 ```
 
 ### Backup Restoration
