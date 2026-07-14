@@ -267,6 +267,66 @@ MAILCOW_BACKUP_LOCATION=/mnt/mailcow-data/backups \
 
 > **Test restores regularly.** A backup never tested is not a backup.
 
+### Testing Backups Periodically
+
+**Schedule:** Test backups monthly (or after any major Mailcow config change).
+
+**Quick verification (5 min):**
+
+1. Check local backup directory exists and contains recent files:
+   ```bash
+   ssh root@<server-ip>
+   ls -lh /mnt/mailcow-data/backups/ | head -5
+   ```
+
+2. Verify cron jobs ran:
+   ```bash
+   # Local backup (should show 02:30 UTC daily)
+   ssh root@<server-ip> grep -i backup /var/log/syslog | tail -3
+   
+   # Offsite sync to B2 (should show 05:00 UTC daily)
+   ssh root@<server-ip> tail -20 /var/log/rclone-backup.log
+   ```
+
+3. Verify B2 has recent files:
+   ```bash
+   # From local machine (requires rclone + B2 creds)
+   rclone ls b2:<bucket-name>/mailcow/ | tail -5
+   ```
+
+**Full restore test (30 min, monthly):**
+
+1. List available backups:
+   ```bash
+   ssh root@<server-ip>
+   ls /mnt/mailcow-data/backups/ | grep -E 'backup_[0-9]' | tail -3
+   ```
+
+2. On a dev machine or test volume, restore a backup:
+   ```bash
+   # Download from B2 to test directory
+   rclone sync b2:<bucket-name>/mailcow/ ./test-restore/
+   
+   # Or restore directly on server (takes downtime):
+   ssh root@<server-ip>
+   MAILCOW_BACKUP_LOCATION=/mnt/mailcow-data/backups \
+     /opt/mailcow-dockerized/helper-scripts/backup_and_restore.sh restore
+   ```
+
+3. Verify restore integrity:
+   - Check mail delivery works
+   - Confirm user accounts and domains are present
+   - Test webmail login
+   - Check file attachments were restored
+
+**Log backup failures:**
+
+If either cron fails, logs show why:
+```bash
+ssh root@<server-ip> grep ERROR /var/log/mailcow-backup.log
+ssh root@<server-ip> grep ERROR /var/log/rclone-backup.log
+```
+
 ---
 
 ## Maintenance
