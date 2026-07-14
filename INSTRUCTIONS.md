@@ -88,6 +88,22 @@ If you want automated offsite backups to Backblaze B2:
 
 ---
 
+## Step 2c — Terraform State Backend (optional, B2)
+
+To store Terraform state in Backblaze B2 instead of locally, follow the **[B2-TFSTATE-MIGRATION.md](B2-TFSTATE-MIGRATION.md)** guide.
+
+**Quick overview:**
+1. Enable B2 in Step 2b
+2. Run `terraform apply` to create both backup and tfstate buckets
+3. Source `.env` to load AWS credentials (aliased from B2 app keys)
+4. Run `terraform init -migrate-state -backend-config="bucket=mailcow-tfstate-{company_name}"` to move state to B2
+5. Verify with `terraform state list` and `terraform plan`
+
+**First deployment (no existing state):** State starts local after `terraform init`, then migrates to B2 after first `apply`.  
+**Existing deployment:** Follow [B2-TFSTATE-MIGRATION.md](B2-TFSTATE-MIGRATION.md) for step-by-step migration.
+
+---
+
 ## Step 3 — Terraform (provision infrastructure)
 
 ```bash
@@ -226,10 +242,12 @@ rclone lsd b2:<bucket-name>/mailcow/
 rclone ls b2:<bucket-name>/mailcow/
 ```
 
-**Terraform state backup** (manual, run after each `terraform apply`):
-```bash
-rclone copy terraform/terraform.tfstate b2:<bucket-name>/tfstate/
-```
+**Terraform state backup:**
+- If using B2 state backend (Step 2c), state is automatically synced — no manual action needed
+- If using local state: after each `terraform apply`, manually backup:
+  ```bash
+  rclone copy terraform/terraform.tfstate b2:mailcow-tfstate-{company_name}/
+  ```
 
 ### Backup Restoration
 

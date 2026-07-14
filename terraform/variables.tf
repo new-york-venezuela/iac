@@ -105,3 +105,9 @@ variable "b2_bucket_name" {
   type        = string
   default     = ""
 }
+
+variable "b2_tfstate_bucket_name" {
+  description = "B2 bucket name for Terraform state. Defaults to mailcow-tfstate-{company_name} if empty. Must be globally unique across all B2 accounts."
+  type        = string
+  default     = ""
+}

@@ -27,7 +27,8 @@ provider "b2" {
 }
 
 locals {
-  b2_bucket_name = var.b2_bucket_name != "" ? var.b2_bucket_name : "mailcow-backup-${var.company_name}"
+  b2_bucket_name         = var.b2_bucket_name != "" ? var.b2_bucket_name : "mailcow-backup-${var.company_name}"
+  b2_tfstate_bucket_name = var.b2_tfstate_bucket_name != "" ? var.b2_tfstate_bucket_name : "mailcow-tfstate-${var.company_name}"
 }
 
 # ---------------------------------------------------------------------------
@@ -164,6 +165,15 @@ resource "hcloud_firewall" "mailcow" {
 resource "b2_bucket" "backup" {
   count       = var.b2_enabled ? 1 : 0
   bucket_name = local.b2_bucket_name
+  bucket_type = "allPrivate"
+}
+
+# ---------------------------------------------------------------------------
+# Backblaze B2 tfstate bucket (created only when b2_enabled = true)
+# ---------------------------------------------------------------------------
+resource "b2_bucket" "tfstate" {
+  count       = var.b2_enabled ? 1 : 0
+  bucket_name = local.b2_tfstate_bucket_name
   bucket_type = "allPrivate"
 }
 
